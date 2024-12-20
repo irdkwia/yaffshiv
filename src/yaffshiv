@@ -73,7 +73,7 @@ class YAFFSConfig(object):
         self.endianess = YAFFS.LITTLE_ENDIAN
         self.page_size = YAFFS.DEFAULT_PAGE_SIZE
         self.spare_size = YAFFS.DEFAULT_SPARE_SIZE
-        self.ecclayout = True
+        self.layout = YAFFS.YAFFS_LAYOUT_ECC
         self.preserve_mode = True
         self.preserve_owner = False
         self.debug = False
@@ -95,7 +95,7 @@ class YAFFSConfig(object):
 
         sys.stdout.write("Page size: %d\n" % self.page_size)
         sys.stdout.write("Spare size: %d\n" % self.spare_size)
-        sys.stdout.write("ECC layout: %s\n" % self.ecclayout)
+        sys.stdout.write("Layout: %d\n" % self.layout)
         sys.stdout.write("Endianess: %s\n\n" % endian_str)
 
     def _auto_detect_settings(self):
@@ -138,22 +138,22 @@ class YAFFSConfig(object):
             # endianess and ECC layout as well!
             if self.sample_data[page_size:].startswith(self.SPARE_START_LITTLE_ENDIAN_ECC):
                 self.page_size = page_size
-                self.ecclayout = True
+                self.layout = YAFFS.YAFFS_LAYOUT_ECC
                 self.endianess = YAFFS.LITTLE_ENDIAN
                 break
             elif self.sample_data[page_size:].startswith(self.SPARE_START_LITTLE_ENDIAN_NO_ECC):
                 self.page_size = page_size
-                self.ecclayout = False
+                self.layout = YAFFS.YAFFS_LAYOUT_NONE
                 self.endianess = YAFFS.LITTLE_ENDIAN
                 break
             elif self.sample_data[page_size:].startswith(self.SPARE_START_BIG_ENDIAN_ECC):
                 self.page_size = page_size
-                self.ecclayout = True
+                self.layout = YAFFS.YAFFS_LAYOUT_ECC
                 self.endianess = YAFFS.BIG_ENDIAN
                 break
             elif self.sample_data[page_size:].startswith(self.SPARE_START_BIG_ENDIAN_NO_ECC):
                 self.page_size = page_size
-                self.ecclayout = False
+                self.layout = YAFFS.YAFFS_LAYOUT_NONE
                 self.endianess = YAFFS.BIG_ENDIAN
                 break
 
@@ -161,7 +161,7 @@ class YAFFSConfig(object):
         try:
             # If not using the ECC layout, there are 2 extra bytes at the beginning of the
             # spare data block. Ignore them.
-            if not self.ecclayout:
+            if self.layout == YAFFS.YAFFS_LAYOUT_ECC:
                 offset = 6
             else:
                 offset = 4
@@ -236,6 +236,11 @@ class YAFFS(object):
     YAFFS_OBJECTID_LOSTNFOUND   = 2
     YAFFS_OBJECTID_UNLINKED     = 3
     YAFFS_OBJECTID_DELETED      = 4
+
+    # Special parent IDs
+    YAFFS_LAYOUT_NONE           = 0
+    YAFFS_LAYOUT_ECC            = 1
+    YAFFS_LAYOUT_PHONE          = 2
 
     # These must be overidden with valid data by any subclass wishing
     # to use the read_long, read_short, read_next or read_block methods.
@@ -375,16 +380,25 @@ class YAFFSSpare(YAFFS):
 
         # YAFFS images built without --yaffs-ecclayout have an extra two
         # bytes before the chunk ID. Possibly an unused CRC?
-        if not self.config.ecclayout:
+        if self.config.layout == YAFFS.YAFFS_LAYOUT_ECC:
             junk = self.read_next(2)
+
+        if self.config.layout == YAFFS.YAFFS_LAYOUT_PHONE:
+            self.read_next(0x12)
 
         self.sequence_id = self.read_next(4)
 
         if self.sequence_id == 0xFFFFFFFF:
             raise YAFFSException("Bad spare data")
 
+        if self.config.layout == YAFFS.YAFFS_LAYOUT_PHONE:
+            self.read_next(0xC)
         self.obj_id = self.read_next(4)
+        if self.config.layout == YAFFS.YAFFS_LAYOUT_PHONE:
+            self.read_next(0xC)
         self.chunk_id = self.read_next(4)
+        if self.config.layout == YAFFS.YAFFS_LAYOUT_PHONE:
+            self.read_next(0xC)
         self.n_bytes = self.read_next(4)
 
         if self.chunk_id & 0x80000000:
@@ -770,6 +784,9 @@ class YAFFSExtractor(YAFFS):
                 entry = self.file_entries[entry_id]
                 if int(entry.yaffs_obj_type) == self.YAFFS_OBJECT_TYPE_FILE:
                     try:
+                        if not os.path.isdir(os.path.dirname(file_path)):
+                            file_path = os.path.join(outdir, b"BROKEN", b"%08d"%file_count, os.path.basename(file_path))
+                            os.makedirs(os.path.dirname(file_path))
                         with open(file_path, 'wb') as fp:
                             fp.write(self.file_entries[entry_id].file_data)
                         self._set_mode_owner(file_path, entry)
@@ -837,7 +854,7 @@ def main():
     page_size = None
     spare_size = None
     endianess = None
-    ecclayout = None
+    layout = YAFFS.YAFFS_LAYOUT_ECC
     preserve_mode = None
     preserve_owner = None
     debug = None
@@ -850,12 +867,12 @@ def main():
     config = None
 
     try:
-        (opts, args) = getopt(sys.argv[1:], "f:d:p:s:e:c:oaDlb", ["file=",
+        (opts, args) = getopt(sys.argv[1:], "f:d:p:s:e:y:oaDlb", ["file=",
                                                                   "dir=",
                                                                   "page-size=",
                                                                   "spare-size=",
                                                                   "endianess=",
-                                                                  "no-ecc",
+                                                                  "layout=",
                                                                   "ownership",
                                                                   "debug",
                                                                   "ls",
@@ -869,7 +886,7 @@ def main():
         sys.stderr.write("    -p, --page-size=<int>           YAFFS page size [default: 2048]\n")
         sys.stderr.write("    -s, --spare-size=<int>          YAFFS spare size [default: 64]\n")
         sys.stderr.write("    -e, --endianess=<big|little>    Set input file endianess [default: little]\n")
-        sys.stderr.write("    -n, --no-ecc                    Don't use the YAFFS oob scheme [default: use the oob scheme]\n")
+        sys.stderr.write("    -y, --layout=<none|ecc|phone>   Choose oob scheme [default: ecc]\n")
         sys.stderr.write("    -a, --auto                      Attempt to auto detect page size, spare size, ECC, and endianess settings [default: False]\n")
         sys.stderr.write("    -b, --brute-force               Attempt all combinations of page size, spare size, ECC, and endianess  [default: False]\n")
         sys.stderr.write("    -o, --ownership                 Preserve original ownership of extracted files [default: False]\n")
@@ -890,8 +907,13 @@ def main():
             auto_detect = True
         elif opt in ["-b", "--brute-force"]:
             brute_force = True
-        elif opt in ["-n", "--no-ecc"]:
-            ecclayout = False
+        elif opt in ["-y", "--layout"]:
+            if arg.lower() == 'ecc':
+                layout = YAFFS.YAFFS_LAYOUT_ECC
+            elif arg.lower() == 'phone':
+                layout = YAFFS.YAFFS_LAYOUT_PHONE
+            else:
+                layout = YAFFS.YAFFS_LAYOUT_NONE
         elif opt in ["-e", "--endianess"]:
             if arg.lower()[0] == 'b':
                 endianess = YAFFS.BIG_ENDIAN
@@ -940,7 +962,7 @@ def main():
         config = YAFFSConfig(page_size=page_size,
                              spare_size=spare_size,
                              endianess=endianess,
-                             ecclayout=ecclayout,
+                             layout=layout,
                              preserve_mode=preserve_mode,
                              preserve_owner=preserve_owner,
                              debug=debug)
@@ -953,7 +975,7 @@ def main():
     # combination that produces the most successfully parsed object entries.
     if not parse_yaffs(fs) and brute_force:
         for endianess in [YAFFS.LITTLE_ENDIAN, YAFFS.BIG_ENDIAN]:
-            for ecclayout in [True, False]:
+            for layout in [YAFFS.YAFFS_LAYOUT_NONE, YAFFS.YAFFS_LAYOUT_ECC, YAFFS.YAFFS_LAYOUT_PHONE]:
                 for page_size in YAFFS.PAGE_SIZES:
                     for spare_size in YAFFS.SPARE_SIZES:
           
@@ -964,7 +986,7 @@ def main():
                         config = YAFFSConfig(page_size=page_size,
                                              spare_size=spare_size,
                                              endianess=endianess,
-                                             ecclayout=ecclayout,
+                                             layout=layout,
                                              preserve_mode=preserve_mode,
                                              preserve_owner=preserve_owner,
                                              debug=debug)
