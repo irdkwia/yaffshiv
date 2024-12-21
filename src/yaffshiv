@@ -681,24 +681,36 @@ class YAFFSExtractor(YAFFS):
                     i.sequence_id, i.obj_id, i.chunk_id, i.n_bytes, i.parent_obj_id,
                     i.obj_type))
             for entry in parser.next_entry():
+                if (entry.yaffs_obj_type, entry.yaffs_obj_id) in self.file_entries:
+                    print(entry.yaffs_obj_id, entry.name, self.file_entries[(entry.yaffs_obj_type, entry.yaffs_obj_id)].name)
+                if (entry.yaffs_obj_type, entry.yaffs_obj_id) not in self.file_entries:
+                    self.file_entries[(int(entry.yaffs_obj_type), entry.yaffs_obj_id)] = entry
+            redo = True
+            while redo:
+                redo = False
+                for entry in self.file_entries.values():
 
-                # Figure out the full path of this file entry
-                if Compat.has_key(self.file_paths, entry.parent_obj_id):
-                    path = os.path.join(self.file_paths[entry.parent_obj_id], entry.name)
-                else:
-                    if entry.parent_obj_id != self.YAFFS_OBJECTID_ROOT:
-                        self.dbg_write("Warning: File %s is the child of an unknown parent object [%d]!\n" % (entry.name,
-                                                                                                            entry.parent_obj_id))
-                        path = os.path.join(b"lost+found", entry.name)
+                    # Figure out the full path of this file entry
+                    if Compat.has_key(self.file_paths, (YAFFS.YAFFS_OBJECT_TYPE_DIRECTORY, entry.parent_obj_id)):
+                        path = os.path.join(self.file_paths[(YAFFS.YAFFS_OBJECT_TYPE_DIRECTORY, entry.parent_obj_id)], entry.name)
+                    elif Compat.has_key(self.file_paths, (YAFFS.YAFFS_OBJECT_TYPE_SYMLINK, entry.parent_obj_id)):
+                        path = os.path.join(self.file_paths[(YAFFS.YAFFS_OBJECT_TYPE_SYMLINK, entry.parent_obj_id)], entry.name)
+                    elif Compat.has_key(self.file_entries, (YAFFS.YAFFS_OBJECT_TYPE_DIRECTORY, entry.parent_obj_id)) or Compat.has_key(self.file_entries, (YAFFS.YAFFS_OBJECT_TYPE_SYMLINK, entry.parent_obj_id)):
+                        redo = True
+                        continue
                     else:
-                        path = entry.name
+                        if entry.parent_obj_id != self.YAFFS_OBJECTID_ROOT:
+                            self.dbg_write("Warning: File %s is the child of an unknown parent object [%d]!\n" % (entry.name,
+                                                                                                                entry.parent_obj_id))
+                            path = os.path.join(b"lost+found", entry.name)
+                        else:
+                            path = entry.name
 
-                # Store full file paths and entry data for later use
-                self.file_paths[entry.yaffs_obj_id] = path
-                self.file_entries[entry.yaffs_obj_id] = entry
+                    # Store full file paths and entry data for later use
+                    self.file_paths[(int(entry.yaffs_obj_type), entry.yaffs_obj_id)] = path
 
-                if self.config.debug:
-                    self._print_entry(entry)
+                    if self.config.debug:
+                        self._print_entry(entry)
 
         return len(self.file_entries)
 
@@ -710,7 +722,7 @@ class YAFFSExtractor(YAFFS):
         sys.stdout.write("File type: %s\n" % str(entry.yaffs_obj_type))
         sys.stdout.write("File ID: %d\n" % entry.yaffs_obj_id)
         sys.stdout.write("File parent ID: %d\n" % entry.parent_obj_id)
-        sys.stdout.write("File name: %s" % self.file_paths[entry.yaffs_obj_id])
+        sys.stdout.write("File name: %s" % self.file_paths[(int(entry.yaffs_obj_type), entry.yaffs_obj_id)])
         if int(entry.yaffs_obj_type) == self.YAFFS_OBJECT_TYPE_SYMLINK:
             sys.stdout.write(" -> %s\n" % entry.alias)
         elif int(entry.yaffs_obj_type) == self.YAFFS_OBJECT_TYPE_HARDLINK:
@@ -730,7 +742,7 @@ class YAFFSExtractor(YAFFS):
         List info for all files in self.file_entries.
         '''
         sys.stdout.write("\n")
-        for (entry_id, entry) in Compat.iterator(self.file_entries):
+        for (_, entry) in Compat.iterator(self.file_entries):
             self._print_entry(entry)
 
     def _set_mode_owner(self, file_path, entry):
@@ -787,6 +799,11 @@ class YAFFSExtractor(YAFFS):
                         if not os.path.isdir(os.path.dirname(file_path)):
                             file_path = os.path.join(outdir, b"BROKEN", b"%08d"%file_count, os.path.basename(file_path))
                             os.makedirs(os.path.dirname(file_path))
+                        if os.path.exists(file_path):
+                            sys.stderr.write("WARNING: path '%s' exists"%file_path)
+                            while os.path.exists(file_path):
+                                file_path = os.path.join(os.path.dirname(file_path), b'amb.'+os.path.basename(file_path))
+                            sys.stderr.write("-> '%s'"%file_path)
                         with open(file_path, 'wb') as fp:
                             fp.write(self.file_entries[entry_id].file_data)
                         self._set_mode_owner(file_path, entry)
